@@ -204,13 +204,6 @@ curl -X POST http://localhost:3050/translate \
 - /translate never persists OpenAI output (ephemeral usage)
 - Segment granularity ensures maximal TM reuse and minimal duplication
 
-## Future Ideas
-
-- Add /delete endpoint for segment removal
-- Add batch ingestion endpoint
-- Add similarity threshold parameter override
-- Expose alignment diagnostics / debug scoring
-
 ## References
 
 - Elasticsearch JS Client Docs: https://www.elastic.co/guide/en/elasticsearch/client/javascript-api/current/index.html
