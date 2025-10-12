@@ -194,7 +194,10 @@ async function listFilesInFolder() {
         }
         // Batch search for all segments in this file
         const allSourceSegments = Array.from(segmentMap.keys());
-        let existingHits: Record<string, any> = {};
+        const existingHits: Record<
+          string,
+          { _id: string; _source: { translated_text: string } }
+        > = {};
         if (allSourceSegments.length > 0) {
           const msearchBody = allSourceSegments.flatMap((seg) => [
             { index: index_name },
@@ -212,9 +215,21 @@ async function listFilesInFolder() {
             },
           ]);
           const msearchRes = await es_client.msearch({ body: msearchBody });
-          msearchRes.responses.forEach((resp: any, idx: number) => {
-            if (resp.hits && resp.hits.hits && resp.hits.hits[0]) {
-              existingHits[allSourceSegments[idx]] = resp.hits.hits[0];
+          msearchRes.responses.forEach((resp: unknown, idx: number) => {
+            const response = resp as {
+              hits?: {
+                hits?: Array<{
+                  _id: string;
+                  _source: { translated_text: string };
+                }>;
+              };
+            };
+            if (
+              response.hits &&
+              response.hits.hits &&
+              response.hits.hits.length > 0
+            ) {
+              existingHits[allSourceSegments[idx]] = response.hits.hits[0];
             }
           });
         }

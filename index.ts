@@ -5,7 +5,7 @@ import type { estypes } from "@elastic/elasticsearch";
 import stringSimilarity from "string-similarity";
 import OpenAI from "openai";
 import dotenv from "dotenv";
-dotenv.config({quiet: true});
+dotenv.config({ quiet: true });
 
 const ES_NODE = process.env.ES_NODE;
 const ES_API_KEY = process.env.ES_API_KEY;
@@ -235,9 +235,13 @@ async function fuzzy_search(
   if (!hit) return undefined;
 
   // Calculate similarity between query segment and TM source
+  const hit_source_text = hit._source?.source_text;
+  if (!hit_source_text) {
+    return undefined;
+  }
   const similarity = stringSimilarity.compareTwoStrings(
     source_text,
-    hit._source?.source_text!
+    hit_source_text
   );
   const percentage = +(similarity * 100).toFixed(2);
 
@@ -302,7 +306,7 @@ app.get("/es-health", async (req: Request, res: Response): Promise<void> => {
   try {
     await es_client.ping();
     res.json({ status: "Elasticsearch connection OK" });
-  } catch (err: any) {
+  } catch (err: unknown) {
     handle_elastic_error(err, res, "Elasticsearch connection failed");
   }
 });
@@ -481,11 +485,14 @@ app.post("/translate", async (req: Request, res: Response): Promise<void> => {
  * Handles Elasticsearch errors and sends appropriate HTTP responses.
  */
 function handle_elastic_error(
-  err: any,
+  err: unknown,
   res: Response,
   customMsg?: string
 ): void {
-  console.error("Elasticsearch error:", err && err.name);
+  console.error(
+    "Elasticsearch error:",
+    err instanceof Error ? err.name : "Unknown error"
+  );
   if (err instanceof errors.ResponseError) {
     let details = err.message;
     if (err.body && typeof err.body === "object" && "error" in err.body) {
