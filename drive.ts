@@ -21,8 +21,8 @@ const service_account_file = path.join(__dirname, SERVICE_ACCOUNT_FILE);
 const credentials = JSON.parse(fs.readFileSync(service_account_file, "utf8"));
 
 // Folder ID to list files from
-const folder_id = "1PQqnYZKu5WAChw1D4IVPiO60NSfr6Orf"; //TODO: Change to your folder ID
-const target_language = "traditional-chinese".toLowerCase(); //TODO: Change target language
+const folder_id = "1PQqnYZKu5WAChw1D4IVPiO60NSfr6Orf"; //INFO: Change to your folder ID
+const target_language = "traditional-chinese".toLowerCase(); //INFO: Change target language
 
 const non_segment_languages = [
   "arabic",
