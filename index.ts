@@ -141,10 +141,12 @@ function split_segments(source_text: string, translated_text?: string) {
  * Removes HTML tags and emojis from the input string and trims whitespace.
  */
 function normalize_text(str: string): string {
-  return str
-    .replace(/<[^>]*>/g, "")
-    .replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "")
-    .trim();
+  return (
+    str
+      // .replace(/<[^>]*>/g, "")
+      .replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "")
+      .trim()
+  );
 }
 
 /**
