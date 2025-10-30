@@ -97,28 +97,44 @@ async function ensure_translations_index(index_name: string): Promise<void> {
 
 // Split segments using sbd
 function split_segments(source_text: string, translated_text?: string) {
-  const source_segments = tokenizer.sentences(source_text).map((s) => s.trim());
+  const options: tokenizer.Options = {
+    newline_boundaries: true,
+    html_boundaries: true,
+  };
+
+  let source_segments = tokenizer.sentences(source_text, options);
+
   if (!translated_text) {
     return { source_segments };
   }
-  const translated_segments = tokenizer
-    .sentences(translated_text)
-    .map((s) => s.trim());
+
+  let translated_segments = tokenizer.sentences(translated_text, options);
+
+  // If lengths match, return
   if (source_segments.length === translated_segments.length) {
     return { source_segments, translated_segments };
   }
+
+  // Retry splitting by common delimiters
+  source_segments = source_text
+    .split(/\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  translated_segments = translated_text
+    .split(/\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (source_segments.length === translated_segments.length) {
+    return { source_segments, translated_segments };
+  }
+
+  // Fallback: just trim and return as single segment arrays
+  console.warn("Fallback: Segment lengths do not match");
   return {
     source_segments: [source_text.trim()],
     translated_segments: [translated_text.trim()],
   };
-}
-
-// Normalize text (remove HTML, emojis, trim)
-function normalize_text(str: string): string {
-  return str
-    .replace(/<[^>]*>/g, "")
-    .replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "")
-    .trim();
 }
 
 async function listFilesInFolder() {
@@ -176,8 +192,8 @@ async function listFilesInFolder() {
         const segmentMap = new Map(); // key: source_segment, value: translated_segment
         for (let i = 1; i < rows.length; i++) {
           const row = rows[i];
-          const source_text = normalize_text(row[0] ?? "");
-          const translated_text = normalize_text(row[1] ?? "");
+          const source_text = row[0] ?? "";
+          const translated_text = row[1] ?? "";
           if (!source_text || !translated_text) continue;
 
           let source_segments = [source_text];

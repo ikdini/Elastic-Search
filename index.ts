@@ -114,40 +114,60 @@ async function ensure_translations_index(index_name: string): Promise<void> {
  * Splits source and translated texts into segments using sentence boundaries.
  */
 function split_segments(source_text: string, translated_text?: string) {
-  const source_segments = tokenizer.sentences(source_text).map((s) => s.trim());
+  const options: tokenizer.Options = {
+    newline_boundaries: true,
+    html_boundaries: true,
+  };
+
+  let source_segments = tokenizer.sentences(source_text, options);
 
   if (!translated_text) {
     return { source_segments };
   }
 
-  const translated_segments = tokenizer
-    .sentences(translated_text)
-    .map((s) => s.trim());
+  let translated_segments = tokenizer.sentences(translated_text, options);
+
+  // If lengths match, return
+  if (source_segments.length === translated_segments.length) {
+    return { source_segments, translated_segments };
+  }
+
+  // Retry splitting by newline only
+  source_segments = source_text
+    .split(/\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  translated_segments = translated_text
+    .split(/\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 
   if (source_segments.length === translated_segments.length) {
     return { source_segments, translated_segments };
   }
 
+  // Fallback: just trim and return as single segment arrays
+  console.warn("Fallback: Segment lengths do not match");
   return {
     source_segments: [source_text.trim()],
     translated_segments: [translated_text.trim()],
   };
 }
 
-/**
- * @function normalize_text
- * @param str - Input string
- * @returns Normalized string
- * Removes HTML tags and emojis from the input string and trims whitespace.
- */
-function normalize_text(str: string): string {
-  return (
-    str
-      // .replace(/<[^>]*>/g, "")
-      .replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "")
-      .trim()
-  );
-}
+// /**
+//  * @function normalize_text
+//  * @param str - Input string
+//  * @returns Normalized string
+//  * Removes HTML tags and emojis from the input string and trims whitespace.
+//  */
+// function normalize_text(str: string): string {
+//   return (
+//     str
+//       // .replace(/<[^>]*>/g, "")
+//       .replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "")
+//       .trim()
+//   );
+// }
 
 /**
  * @function find_translation_segment
@@ -318,14 +338,13 @@ app.post(
   "/add-translation",
   async (req: Request, res: Response): Promise<void> => {
     try {
+      // eslint-disable-next-line prefer-const
       let { source_lang, target_lang, source_text, translated_text } =
         req.body as TranslationDocument;
 
       // Normalize
       source_lang = source_lang?.toLowerCase().trim().replace(/\s+/g, "-");
       target_lang = target_lang?.toLowerCase().trim().replace(/\s+/g, "-");
-      source_text = normalize_text(source_text);
-      translated_text = normalize_text(translated_text!);
 
       if (!source_lang || !target_lang || !source_text || !translated_text) {
         res.status(400).json({ error: "All fields are required" });
@@ -424,11 +443,11 @@ app.post(
 // Fetch translation (segment-based, always fuzzy search, do not store)
 app.post("/translate", async (req: Request, res: Response): Promise<void> => {
   try {
+    // eslint-disable-next-line prefer-const
     let { source_lang, target_lang, source_text } =
       req.body as TranslationDocument;
     source_lang = source_lang?.toLowerCase().trim().replace(/\s+/g, "-");
     target_lang = target_lang?.toLowerCase().trim().replace(/\s+/g, "-");
-    source_text = normalize_text(source_text);
     if (!source_lang || !target_lang || !source_text) {
       res.status(400).json({ error: "All fields are required" });
       return;
