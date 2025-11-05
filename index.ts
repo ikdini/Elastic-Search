@@ -154,21 +154,6 @@ function split_segments(source_text: string, translated_text?: string) {
   };
 }
 
-// /**
-//  * @function normalize_text
-//  * @param str - Input string
-//  * @returns Normalized string
-//  * Removes HTML tags and emojis from the input string and trims whitespace.
-//  */
-// function normalize_text(str: string): string {
-//   return (
-//     str
-//       // .replace(/<[^>]*>/g, "")
-//       .replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "")
-//       .trim()
-//   );
-// }
-
 /**
  * @function find_translation_segment
  * @param index_name - Name of the Elasticsearch index
@@ -472,6 +457,7 @@ app.post("/translate", async (req: Request, res: Response): Promise<void> => {
             source_text: hit._source.source_text,
             similarity: hit.similarity,
             source: "CAT Tool",
+            id: hit._id,
           };
         } else {
           const translated_text = await chatgpt(
@@ -484,6 +470,7 @@ app.post("/translate", async (req: Request, res: Response): Promise<void> => {
             translated_text,
             similarity: 0,
             source: "ChatGPT",
+            id: null,
           };
         }
       })
