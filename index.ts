@@ -1,3 +1,4 @@
+/* eslint-disable prefer-const */
 import express, { Request, Response } from "express";
 import { Client, errors } from "@elastic/elasticsearch";
 import tokenizer from "sbd";
@@ -262,6 +263,63 @@ async function fuzzy_search(
 }
 
 /**
+ * @function top_search
+ * @param index_name - Name of the Elasticsearch index
+ * @param source_lang - Source language
+ * @param target_lang - Target language
+ * @param source_text - Source text segment
+ * @returns Search hit or undefined
+ * Finds the best fuzzy translation segment in the Elasticsearch index with >=80% match accuracy.
+ */
+async function top_search(
+  index_name: string,
+  source_lang: string,
+  target_lang: string,
+  source_text: string
+): Promise<SearchHit[]> {
+  const search_result = await es_client.search<TranslationDocument>({
+    index: index_name,
+    size: 10,
+    query: {
+      bool: {
+        must: [{ term: { source_lang } }, { term: { target_lang } }],
+        should: [
+          {
+            match_phrase: {
+              source_text: {
+                query: source_text,
+                boost: 5,
+              },
+            },
+          },
+          {
+            match: {
+              source_text: {
+                query: source_text,
+                operator: "and",
+                boost: 3,
+              },
+            },
+          },
+          {
+            match: {
+              source_text: {
+                query: source_text,
+                fuzziness: "AUTO",
+                boost: 1,
+              },
+            },
+          },
+        ],
+        minimum_should_match: 1,
+      },
+    },
+  });
+  const hits = search_result.hits.hits;
+  return hits;
+}
+
+/**
  * @function chatgpt
  * @param source_lang - Source language
  * @param target_lang - Target language
@@ -323,7 +381,6 @@ app.post(
   "/add-translation",
   async (req: Request, res: Response): Promise<void> => {
     try {
-      // eslint-disable-next-line prefer-const
       let { source_lang, target_lang, source_text, translated_text } =
         req.body as TranslationDocument;
 
@@ -428,7 +485,6 @@ app.post(
 // Fetch translation (segment-based, always fuzzy search, do not store)
 app.post("/translate", async (req: Request, res: Response): Promise<void> => {
   try {
-    // eslint-disable-next-line prefer-const
     let { source_lang, target_lang, source_text } =
       req.body as TranslationDocument;
     source_lang = source_lang?.toLowerCase().trim().replace(/\s+/g, "-");
@@ -484,6 +540,60 @@ app.post("/translate", async (req: Request, res: Response): Promise<void> => {
     handle_elastic_error(err, res);
   }
 });
+
+// Fetch translations (segment-based, always fuzzy search, do not store)
+app.post("/find", async (req: Request, res: Response): Promise<void> => {
+  try {
+    let { source_lang, target_lang, source_text } =
+      req.body as TranslationDocument;
+    source_lang = source_lang?.toLowerCase().trim().replace(/\s+/g, "-");
+    target_lang = target_lang?.toLowerCase().trim().replace(/\s+/g, "-");
+    if (!source_lang || !target_lang || !source_text) {
+      res.status(400).json({ error: "All fields are required" });
+      return;
+    }
+
+    const index_name = `translations(${target_lang.toLowerCase()})`;
+
+    const hits = await top_search(
+      index_name,
+      source_lang,
+      target_lang,
+      source_text
+    );
+
+    res.json(hits);
+  } catch (err) {
+    handle_elastic_error(err, res);
+  }
+});
+
+// Delete a document in TM by id
+app.delete(
+  "/delete-translation",
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { target_lang, id } = req.body as {
+        target_lang?: string;
+        id?: string;
+      };
+      if (!target_lang || !id) {
+        res.status(400).json({ error: "target_lang and id are required" });
+        return;
+      }
+      const normalized_lang = target_lang
+        .toLowerCase()
+        .trim()
+        .replace(/\s+/g, "-");
+      const index_name = `translations(${normalized_lang})`;
+      await ensure_translations_index(index_name);
+      const result = await es_client.delete({ index: index_name, id });
+      res.json({ success: true, result });
+    } catch (err) {
+      handle_elastic_error(err, res);
+    }
+  }
+);
 
 /**
  * @function handleElasticError
