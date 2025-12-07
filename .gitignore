@@ -138,4 +138,5 @@ dist
 # Others
 */uploads
 requests/
+tm-db/
 *-*.json
