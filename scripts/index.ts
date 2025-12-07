@@ -517,9 +517,9 @@ app.post("/translate", async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    const { source_segments } = split_segments(source_text);
     const index_name = `translations_${target_lang}`;
     await ensure_translations_index(index_name);
+    const { source_segments } = split_segments(source_text);
 
     const results = await Promise.all(
       source_segments.map(async (source_segment) => {
