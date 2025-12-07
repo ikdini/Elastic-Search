@@ -11,6 +11,7 @@ dotenv.config({ quiet: true });
 const ES_NODE = process.env.ES_NODE;
 const ES_API_KEY = process.env.ES_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const SIMILARITY_THRESHOLD = Number(process.env.SIMILARITY_THRESHOLD) || 80;
 if (!ES_NODE || !ES_API_KEY || !OPENAI_API_KEY) {
   console.error("Missing required env variable(s).");
   process.exit(1);
@@ -39,13 +40,13 @@ interface TranslationDocument {
 }
 type SearchHit = estypes.SearchHit<TranslationDocument>;
 
-const non_segment_languages = [
+const non_segment_languages = new Set([
   "arabic",
   "japanese",
   "korean",
   "simplified-chinese",
   "traditional-chinese",
-];
+]);
 
 /**
  * @function ensure_translations_index
@@ -71,8 +72,8 @@ async function ensure_translations_index(index_name: string): Promise<void> {
           tokenizer: {
             ngram_tokenizer: {
               type: "ngram",
-              min_gram: 3,
-              max_gram: 5,
+              min_gram: 2,
+              max_gram: 10,
               token_chars: ["letter", "digit", "whitespace"],
             },
           },
@@ -111,48 +112,29 @@ async function ensure_translations_index(index_name: string): Promise<void> {
  * @function split_segments
  * @param source_text - Source text to split into segments
  * @param translated_text - Translated text to split into segments
- * @returns Object containing source and translated segments
+ * @returns Object containing source and translated segments, with mismatch flag
  * Splits source and translated texts into segments using sentence boundaries.
+ * Returns mismatch flag if segment counts don't align.
  */
 function split_segments(source_text: string, translated_text?: string) {
-  const options: tokenizer.Options = {
+  const tokenizer_options: tokenizer.Options = {
     newline_boundaries: true,
     html_boundaries: true,
   };
 
-  let source_segments = tokenizer.sentences(source_text, options);
+  const source_segments = tokenizer.sentences(source_text, tokenizer_options);
 
   if (!translated_text) {
-    return { source_segments };
+    return { source_segments, translated_segments: undefined, mismatch: false };
   }
 
-  let translated_segments = tokenizer.sentences(translated_text, options);
+  const translated_segments = tokenizer.sentences(
+    translated_text,
+    tokenizer_options
+  );
+  const mismatch = source_segments.length !== translated_segments.length;
 
-  // If lengths match, return
-  if (source_segments.length === translated_segments.length) {
-    return { source_segments, translated_segments };
-  }
-
-  // Retry splitting by newline only
-  source_segments = source_text
-    .split(/\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  translated_segments = translated_text
-    .split(/\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  if (source_segments.length === translated_segments.length) {
-    return { source_segments, translated_segments };
-  }
-
-  // Fallback: just trim and return as single segment arrays
-  console.warn("Fallback: Segment lengths do not match");
-  return {
-    source_segments: [source_text.trim()],
-    translated_segments: [translated_text.trim()],
-  };
+  return { source_segments, translated_segments, mismatch };
 }
 
 /**
@@ -192,8 +174,8 @@ async function find_translation_segment(
  * @param source_lang - Source language
  * @param target_lang - Target language
  * @param source_text - Source text segment
- * @returns Search hit or undefined
- * Finds the best fuzzy translation segment in the Elasticsearch index with >=80% match accuracy.
+ * @returns Search hit with similarity score or undefined
+ * Finds the best fuzzy translation segment matching the similarity threshold.
  */
 async function fuzzy_search(
   index_name: string,
@@ -203,17 +185,14 @@ async function fuzzy_search(
 ): Promise<(SearchHit & { similarity: number }) | undefined> {
   const search_result = await es_client.search<TranslationDocument>({
     index: index_name,
-    size: 1,
+    size: 10,
     query: {
       bool: {
         must: [{ term: { source_lang } }, { term: { target_lang } }],
         should: [
           {
             match_phrase: {
-              source_text: {
-                query: source_text,
-                boost: 5,
-              },
+              source_text: { query: source_text, boost: 5 },
             },
           },
           {
@@ -239,27 +218,29 @@ async function fuzzy_search(
       },
     },
   });
-  const hit = search_result.hits.hits[0];
-  if (!hit) return undefined;
 
-  // Calculate similarity between query segment and TM source
-  const hit_source_text = hit._source?.source_text;
-  if (!hit_source_text) {
-    return undefined;
-  }
-  const similarity = stringSimilarity.compareTwoStrings(
-    source_text,
-    hit_source_text
+  const hits = search_result.hits.hits;
+  if (hits.length === 0) return undefined;
+
+  const target_strings = hits
+    .map((hit) => hit._source?.source_text?.toLowerCase())
+    .filter((text): text is string => text !== undefined);
+
+  if (target_strings.length === 0) return undefined;
+
+  const best_match_result = stringSimilarity.findBestMatch(
+    source_text.toLowerCase(),
+    target_strings
   );
-  const percentage = +(similarity * 100).toFixed(2);
 
-  // Only return if >= 50%
-  if (percentage < 50) return undefined;
+  const percentage = +(best_match_result.bestMatch.rating * 100).toFixed(2);
 
-  return {
-    ...hit,
-    similarity: percentage,
-  };
+  if (percentage >= SIMILARITY_THRESHOLD) {
+    const best_hit = hits[best_match_result.bestMatchIndex];
+    return { ...best_hit, similarity: percentage };
+  }
+
+  return undefined;
 }
 
 /**
@@ -362,7 +343,6 @@ async function chatgpt(
     store: true,
   });
   const response = modelCompletion.choices[0].message.content;
-
   return response!;
 }
 
@@ -395,13 +375,29 @@ app.post(
 
       let source_segments = [source_text];
       let translated_segments = [translated_text];
-      if (!non_segment_languages.includes(target_lang)) {
+      if (!non_segment_languages.has(target_lang)) {
         const segmentResult = split_segments(source_text, translated_text);
+
+        // Reject if segment count mismatch
+        if (segmentResult.mismatch) {
+          res.status(400).json({
+            error: "Segment count mismatch",
+            details: `Source has "${
+              segmentResult.source_segments.length
+            }" segments, translation has "${
+              segmentResult.translated_segments!.length
+            }" segments. Please ensure source and translated text have matching segment counts.`,
+            source_segments: segmentResult.source_segments,
+            translated_segments: segmentResult.translated_segments,
+          });
+          return;
+        }
+
         source_segments = segmentResult.source_segments;
         translated_segments = segmentResult.translated_segments!;
       }
 
-      const index_name = `translations(${target_lang})`;
+      const index_name = `translations_${target_lang}`;
       await ensure_translations_index(index_name);
 
       // Gather all hits in parallel to minimize latency
@@ -422,21 +418,39 @@ app.post(
         id: string | null | undefined;
         action: "inserted" | "updated";
       }[] = [];
+      const insertResultIndices: number[] = []; // Track which results are inserts (resultIndex -> bulkItemIndex)
+      const processedSegments = new Map<
+        string,
+        { id: string | null; action: "inserted" | "updated" }
+      >(); // Map segment key to ID and action
 
       for (let i = 0; i < source_segments.length; i++) {
         const source_segment = source_segments[i];
-        const translated_segment = translated_segments[i];
+        const segment_key = source_segment.toLowerCase().trim();
         const hit = hits[i];
 
-        if (hit) {
-          // Update existing TM entry
-          bulkBody.push({ update: { _index: index_name, _id: hit._id } });
-          bulkBody.push({ doc: { translated_text: translated_segment } });
+        if (processedSegments.has(segment_key)) {
+          // Duplicate segment - reuse existing result with cached action
+          const cached = processedSegments.get(segment_key)!;
           results.push({
             segment: source_segment,
-            id: hit._id,
-            action: "updated",
+            id: cached.id,
+            action: cached.action,
           });
+        } else if (hit) {
+          // Update existing TM entry
+          const resultId = hit._id ?? null;
+          bulkBody.push({ update: { _index: index_name, _id: hit._id } });
+          bulkBody.push({
+            doc: { translated_text: translated_segments[i] },
+          });
+          const result = {
+            segment: source_segment,
+            id: resultId,
+            action: "updated" as const,
+          };
+          results.push(result);
+          processedSegments.set(segment_key, result);
         } else {
           // Insert new TM entry
           bulkBody.push({ index: { _index: index_name } });
@@ -444,13 +458,16 @@ app.post(
             source_lang,
             target_lang,
             source_text: source_segment,
-            translated_text: translated_segment,
+            translated_text: translated_segments[i],
           });
-          results.push({
+          insertResultIndices.push(results.length);
+          const result = {
             segment: source_segment,
             id: null,
-            action: "inserted",
-          });
+            action: "inserted" as const,
+          };
+          results.push(result);
+          processedSegments.set(segment_key, result);
         }
       }
 
@@ -461,16 +478,22 @@ app.post(
           body: bulkBody,
         });
 
-        // Map back ES IDs for inserts (only for inserted actions)
-        let insertIdx = 0;
-        for (let i = 0; i < results.length; i++) {
-          if (results[i].action === "inserted") {
-            // Find the corresponding bulk response item for this insert
-            // Each insert is 2 items in bulkBody: action, then doc
-            // Bulk response items are in order, so we can use insertIdx
-            const id = bulkResponse.items[insertIdx]?.index?._id || null;
-            results[i].id = id;
-            insertIdx++;
+        // Extract IDs from bulk response for inserted documents
+        if (bulkResponse.items && insertResultIndices.length > 0) {
+          let bulkItemIndex = 0;
+          for (const resultIndex of insertResultIndices) {
+            // Find the next insert item in bulk response
+            while (
+              bulkItemIndex < bulkResponse.items.length &&
+              !bulkResponse.items[bulkItemIndex]?.index
+            ) {
+              bulkItemIndex++;
+            }
+            const bulkItem = bulkResponse.items[bulkItemIndex];
+            if (bulkItem?.index?._id) {
+              results[resultIndex].id = bulkItem.index._id;
+            }
+            bulkItemIndex++;
           }
         }
       }
@@ -495,7 +518,7 @@ app.post("/translate", async (req: Request, res: Response): Promise<void> => {
     }
 
     const { source_segments } = split_segments(source_text);
-    const index_name = `translations(${target_lang.toLowerCase()})`;
+    const index_name = `translations_${target_lang}`;
     await ensure_translations_index(index_name);
 
     const results = await Promise.all(
@@ -553,8 +576,7 @@ app.post("/find", async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    const index_name = `translations(${target_lang.toLowerCase()})`;
-
+    const index_name = `translations_${target_lang}`;
     const hits = await top_search(
       index_name,
       source_lang,
@@ -569,31 +591,26 @@ app.post("/find", async (req: Request, res: Response): Promise<void> => {
 });
 
 // Delete a document in TM by id
-app.delete(
-  "/delete-translation",
-  async (req: Request, res: Response): Promise<void> => {
-    try {
-      const { target_lang, id } = req.body as {
-        target_lang?: string;
-        id?: string;
-      };
-      if (!target_lang || !id) {
-        res.status(400).json({ error: "target_lang and id are required" });
-        return;
-      }
-      const normalized_lang = target_lang
-        .toLowerCase()
-        .trim()
-        .replace(/\s+/g, "-");
-      const index_name = `translations(${normalized_lang})`;
-      await ensure_translations_index(index_name);
-      const result = await es_client.delete({ index: index_name, id });
-      res.json({ success: true, result });
-    } catch (err) {
-      handle_elastic_error(err, res);
+app.delete("/delete", async (req: Request, res: Response): Promise<void> => {
+  try {
+    let { target_lang, id } = req.body as {
+      target_lang: string;
+      id: string;
+    };
+    target_lang = target_lang?.toLowerCase().trim().replace(/\s+/g, "-");
+    if (!target_lang || !id) {
+      res.status(400).json({ error: "target_lang and id are required" });
+      return;
     }
+
+    const index_name = `translations_${target_lang}`;
+    await ensure_translations_index(index_name);
+    const result = await es_client.delete({ index: index_name, id });
+    res.json({ success: true, result });
+  } catch (err) {
+    handle_elastic_error(err, res);
   }
-);
+});
 
 /**
  * @function handleElasticError

@@ -13,7 +13,7 @@ Segment-based translation memory service that:
 - Upsert logic: existing segment => update, new segment => insert
 - Similarity scoring using string-similarity (Dice coefficient) for fuzzy matches
 - OpenAI fallback clearly labeled in response (`source: "ChatGPT"` vs `"CAT Tool"`)
-- Per‑target language TM index pattern: `translations(<target_lang>)`
+- Per‑target language TM index pattern: `translations_<target_lang>`
 - Lightweight health endpoint to verify Elasticsearch connectivity
 
 ## Tech Stack
@@ -56,7 +56,7 @@ Never commit real secrets. `.env` is git‑ignored.
 
 ## Index Mapping (Created Automatically)
 
-When a target language is first used we create an index: `translations(<target_lang>)` with mapping:
+When a target language is first used we create an index: `translations_<target_lang>` with mapping:
 
 ```
 source_text: text (custom ngram_analyzer) + keyword subfield (dedup)

@@ -24,22 +24,27 @@ const credentials = JSON.parse(fs.readFileSync(service_account_file, "utf8"));
 const folder_id = "1PQqnYZKu5WAChw1D4IVPiO60NSfr6Orf"; //INFO: Change to your folder ID
 const target_language = "traditional-chinese".toLowerCase(); //INFO: Change target language
 
-const non_segment_languages = [
+const non_segment_languages = new Set([
   "arabic",
   "japanese",
   "korean",
   "simplified-chinese",
   "traditional-chinese",
-];
+]);
 
 const es_client = new Client({
   node: ES_NODE,
   auth: {
     apiKey: ES_API_KEY,
   },
+  // serverMode: "serverless",
 });
 
-// Ensure translations index exists with mapping
+/**
+ * @function ensure_translations_index
+ * @param index_name - Name of the Elasticsearch index
+ * Ensures the translations index exists with the correct mapping.
+ */
 async function ensure_translations_index(index_name: string): Promise<void> {
   const exists = await es_client.indices.exists({ index: index_name });
   if (!exists) {
@@ -59,8 +64,8 @@ async function ensure_translations_index(index_name: string): Promise<void> {
           tokenizer: {
             ngram_tokenizer: {
               type: "ngram",
-              min_gram: 3,
-              max_gram: 5,
+              min_gram: 2,
+              max_gram: 10,
               token_chars: ["letter", "digit", "whitespace"],
             },
           },
@@ -95,46 +100,33 @@ async function ensure_translations_index(index_name: string): Promise<void> {
   }
 }
 
-// Split segments using sbd
+/**
+ * @function split_segments
+ * @param source_text - Source text to split into segments
+ * @param translated_text - Translated text to split into segments
+ * @returns Object containing source and translated segments, with mismatch flag
+ * Splits source and translated texts into segments using sentence boundaries.
+ * Returns mismatch flag if segment counts don't align.
+ */
 function split_segments(source_text: string, translated_text?: string) {
-  const options: tokenizer.Options = {
+  const tokenizer_options: tokenizer.Options = {
     newline_boundaries: true,
     html_boundaries: true,
   };
 
-  let source_segments = tokenizer.sentences(source_text, options);
+  const source_segments = tokenizer.sentences(source_text, tokenizer_options);
 
   if (!translated_text) {
-    return { source_segments };
+    return { source_segments, translated_segments: undefined, mismatch: false };
   }
 
-  let translated_segments = tokenizer.sentences(translated_text, options);
+  const translated_segments = tokenizer.sentences(
+    translated_text,
+    tokenizer_options
+  );
+  const mismatch = source_segments.length !== translated_segments.length;
 
-  // If lengths match, return
-  if (source_segments.length === translated_segments.length) {
-    return { source_segments, translated_segments };
-  }
-
-  // Retry splitting by common delimiters
-  source_segments = source_text
-    .split(/\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  translated_segments = translated_text
-    .split(/\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  if (source_segments.length === translated_segments.length) {
-    return { source_segments, translated_segments };
-  }
-
-  // Fallback: just trim and return as single segment arrays
-  console.warn("Fallback: Segment lengths do not match");
-  return {
-    source_segments: [source_text.trim()],
-    translated_segments: [translated_text.trim()],
-  };
+  return { source_segments, translated_segments, mismatch };
 }
 
 async function listFilesInFolder() {
@@ -157,6 +149,7 @@ async function listFilesInFolder() {
       console.log("No spreadsheet files found.");
       return;
     }
+
     // Process all spreadsheet files in the folder
     console.log(`Total Files: ${files.length}`);
     for (const file of files) {
@@ -186,7 +179,7 @@ async function listFilesInFolder() {
         );
 
         // Prepare all segments for this file
-        const index_name = `translations(${target_language})`;
+        const index_name = `translations_${target_language}`;
         await ensure_translations_index(index_name);
 
         const segmentMap = new Map(); // key: source_segment, value: translated_segment
@@ -198,8 +191,10 @@ async function listFilesInFolder() {
 
           let source_segments = [source_text];
           let translated_segments = [translated_text];
-          if (!non_segment_languages.includes(target_language)) {
+          if (!non_segment_languages.has(target_language)) {
             const segmentResult = split_segments(source_text, translated_text);
+            if (segmentResult.mismatch) continue;
+
             source_segments = segmentResult.source_segments;
             translated_segments = segmentResult.translated_segments!;
           }
