@@ -12,7 +12,6 @@ if (!ES_NODE || !ES_API_KEY) {
 }
 
 const TM_DB_DIR = resolve(__dirname, "../tm-db");
-const BATCH_SIZE = 1000;
 
 interface TranslationDocument {
   source_lang: string;
@@ -31,7 +30,7 @@ const es_client = new Client({
 /**
  * @function exportTranslations
  * @param target_lang - Target language to export
- * Fetches all translations from the index and saves to JSON file
+ * Fetches all translations from the index using scroll API and saves to JSON file
  */
 async function exportTranslations(target_lang: string): Promise<void> {
   target_lang = target_lang.toLowerCase().trim().replace(/\s+/g, "-");
@@ -45,29 +44,51 @@ async function exportTranslations(target_lang: string): Promise<void> {
 
   console.log(`Fetching all documents from index: ${index_name}...`);
 
-  // Fetch all documents using from/size pagination
+  // Use scroll API to fetch all documents efficiently
   const documents: TranslationDocument[] = [];
-  let from = 0;
-  let hasMore = true;
+  let scrollId: string | undefined;
 
-  while (hasMore) {
-    const result = await es_client.search<TranslationDocument>({
+  try {
+    // Initial search with scroll
+    let result = await es_client.search<TranslationDocument>({
       index: index_name,
-      from,
-      size: BATCH_SIZE,
+      size: 1000,
+      scroll: "2m",
       query: { match_all: {} },
     });
 
-    if (result.hits.hits.length === 0) {
-      hasMore = false;
-    } else {
+    scrollId = result._scroll_id;
+
+    // Collect documents from first batch
+    result.hits.hits.forEach((hit) => {
+      if (hit._source) {
+        documents.push(hit._source);
+      }
+    });
+
+    // Continue scrolling until no more documents
+    while (result.hits.hits.length > 0) {
+      result = await es_client.scroll({
+        scroll_id: scrollId,
+        scroll: "2m",
+      });
+
+      scrollId = result._scroll_id;
+
+      if (result.hits.hits.length === 0) break;
+
       result.hits.hits.forEach((hit) => {
         if (hit._source) {
           documents.push(hit._source);
         }
       });
-
-      from += BATCH_SIZE;
+    }
+  } finally {
+    // Clear scroll context
+    if (scrollId) {
+      await es_client.clearScroll({ scroll_id: scrollId }).catch(() => {
+        // Ignore errors on scroll cleanup
+      });
     }
   }
 
@@ -76,7 +97,7 @@ async function exportTranslations(target_lang: string): Promise<void> {
   // Create tm_db directory if it doesn't exist
   mkdirSync(TM_DB_DIR, { recursive: true });
 
-  // Save to JSON file using writeFileSync for better performance with large files
+  // Save to JSON file
   const fileName = `${target_lang}.json`;
   const filePath = resolve(TM_DB_DIR, fileName);
 
@@ -124,6 +145,27 @@ async function exportMultipleLanguages(target_langs: string[]): Promise<void> {
 }
 
 // Target languages to export - modify this array as needed
-const target_langs = ["french", "spanish", "italian"];
+const target_langs = [
+  "arabic",
+  "filipino",
+  "french",
+  "german",
+  "greek",
+  "indonesian",
+  "italian",
+  "japanese",
+  "korean",
+  "malay",
+  "polish",
+  "portuguese",
+  "russian",
+  "simplified-chinese",
+  "spanish",
+  "swedish",
+  "thai",
+  "traditional-chinese",
+  "turkish",
+  "vietnamese",
+];
 
 exportMultipleLanguages(target_langs);
