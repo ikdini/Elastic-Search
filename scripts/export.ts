@@ -34,7 +34,7 @@ const es_client = new Client({
  */
 async function exportTranslations(target_lang: string): Promise<void> {
   target_lang = target_lang.toLowerCase().trim().replace(/\s+/g, "-");
-  const index_name = `translations_${target_lang}`;
+  const index_name = `english-${target_lang}`;
 
   // Check if index exists
   const exists = await es_client.indices.exists({ index: index_name });

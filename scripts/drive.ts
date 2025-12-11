@@ -179,7 +179,7 @@ async function listFilesInFolder() {
         );
 
         // Prepare all segments for this file
-        const index_name = `translations_${target_language}`;
+        const index_name = `english-${target_language}`;
         await ensure_translations_index(index_name);
 
         const segmentMap = new Map(); // key: source_segment, value: translated_segment

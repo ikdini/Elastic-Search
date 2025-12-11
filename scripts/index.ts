@@ -25,7 +25,7 @@ const es_client = new Client({
   auth: {
     apiKey: ES_API_KEY,
   },
-  // serverMode: "serverless",
+  serverMode: "serverless",
 });
 
 const openai = new OpenAI({
@@ -59,9 +59,6 @@ async function ensure_translations_index(index_name: string): Promise<void> {
     await es_client.indices.create({
       index: index_name,
       settings: {
-        index: {
-          max_ngram_diff: 8,
-        },
         analysis: {
           normalizer: {
             lowercase_normalizer: {
@@ -73,7 +70,7 @@ async function ensure_translations_index(index_name: string): Promise<void> {
             ngram_tokenizer: {
               type: "ngram",
               min_gram: 2,
-              max_gram: 10,
+              max_gram: 3,
               token_chars: ["letter", "digit", "whitespace"],
             },
           },
@@ -91,7 +88,7 @@ async function ensure_translations_index(index_name: string): Promise<void> {
           source_text: {
             type: "text",
             analyzer: "ngram_analyzer",
-            search_analyzer: "standard",
+            search_analyzer: "ngram_analyzer",
             fields: {
               dedup: {
                 type: "keyword",
@@ -185,7 +182,7 @@ async function fuzzy_search(
 ): Promise<(SearchHit & { similarity: number }) | undefined> {
   const search_result = await es_client.search<TranslationDocument>({
     index: index_name,
-    size: 10,
+    size: 100,
     query: {
       bool: {
         must: [{ term: { source_lang } }, { term: { target_lang } }],
@@ -397,7 +394,7 @@ app.post(
         translated_segments = segmentResult.translated_segments!;
       }
 
-      const index_name = `translations_${target_lang}`;
+      const index_name = `${source_lang}-${target_lang}`;
       await ensure_translations_index(index_name);
 
       // Gather all hits in parallel to minimize latency
@@ -517,7 +514,7 @@ app.post("/translate", async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    const index_name = `translations_${target_lang}`;
+    const index_name = `${source_lang}-${target_lang}`;
     await ensure_translations_index(index_name);
     const { source_segments } = split_segments(source_text);
 
@@ -576,7 +573,7 @@ app.post("/find", async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    const index_name = `translations_${target_lang}`;
+    const index_name = `${source_lang}-${target_lang}`;
     const hits = await top_search(
       index_name,
       source_lang,
@@ -593,17 +590,19 @@ app.post("/find", async (req: Request, res: Response): Promise<void> => {
 // Delete a document in TM by id
 app.delete("/delete", async (req: Request, res: Response): Promise<void> => {
   try {
-    let { target_lang, id } = req.body as {
+    let {source_lang, target_lang, id } = req.body as {
+      source_lang: string;
       target_lang: string;
       id: string;
     };
+    source_lang = source_lang?.toLowerCase().trim().replace(/\s+/g, "-");
     target_lang = target_lang?.toLowerCase().trim().replace(/\s+/g, "-");
-    if (!target_lang || !id) {
-      res.status(400).json({ error: "target_lang and id are required" });
+    if (!source_lang || !target_lang || !id) {
+      res.status(400).json({ error: "source_lang, target_lang and id are required" });
       return;
     }
 
-    const index_name = `translations_${target_lang}`;
+    const index_name = `${source_lang}-${target_lang}`;
     await ensure_translations_index(index_name);
     const result = await es_client.delete({ index: index_name, id });
     res.json({ success: true, result });
