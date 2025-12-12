@@ -303,22 +303,22 @@ async function top_search(
  * @param target_lang - Target language
  * @param source_text - Source text segment
  * @returns Translated text from ChatGPT
- * Uses OpenAI's GPT-4o model to translate text segments.
+ * Uses OpenAI's model to translate text segments.
  */
 async function chatgpt(
   source_lang: string,
   target_lang: string,
   source_text: string
 ): Promise<string> {
-  const modelCompletion = await openai.chat.completions.create({
-    model: "gpt-4o",
-    messages: [
+  const response = await openai.responses.create({
+    model: "gpt-5",
+    input: [
       {
-        role: "system",
+        role: "developer",
         content: [
           {
+            type: "input_text",
             text: `You are a professional native translator.\nTranslate the following ${source_lang} text into ${target_lang} using native-level, idiomatic structures typical of the ${target_lang} language. Do not mirror the sentence structure or punctuation of the source. However, you must preserve every meaning in the original ${source_lang} text with full precision. Do not add, omit, generalize, or invent anything. The final result must read as if it were originally written in the ${target_lang} language: fluid, accurate, and professional.`,
-            type: "text",
           },
         ],
       },
@@ -326,21 +326,16 @@ async function chatgpt(
         role: "user",
         content: [
           {
+            type: "input_text",
             text: source_text,
-            type: "text",
           },
         ],
       },
     ],
-    response_format: {
-      type: "text",
-    },
-    temperature: 1,
-    max_completion_tokens: 15000,
-    store: true,
+    store: false,
+    max_output_tokens: 25000,
   });
-  const response = modelCompletion.choices[0].message.content;
-  return response!;
+  return response.output_text;
 }
 
 // Health check for Elasticsearch connection
@@ -590,7 +585,7 @@ app.post("/find", async (req: Request, res: Response): Promise<void> => {
 // Delete a document in TM by id
 app.delete("/delete", async (req: Request, res: Response): Promise<void> => {
   try {
-    let {source_lang, target_lang, id } = req.body as {
+    let { source_lang, target_lang, id } = req.body as {
       source_lang: string;
       target_lang: string;
       id: string;
@@ -598,7 +593,9 @@ app.delete("/delete", async (req: Request, res: Response): Promise<void> => {
     source_lang = source_lang?.toLowerCase().trim().replace(/\s+/g, "-");
     target_lang = target_lang?.toLowerCase().trim().replace(/\s+/g, "-");
     if (!source_lang || !target_lang || !id) {
-      res.status(400).json({ error: "source_lang, target_lang and id are required" });
+      res
+        .status(400)
+        .json({ error: "source_lang, target_lang and id are required" });
       return;
     }
 

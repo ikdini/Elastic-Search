@@ -4,7 +4,7 @@ Segment-based translation memory service that:
 
 - Stores sentence-level bilingual segments in Elasticsearch
 - Performs fuzzy lookups with n‑gram + phrase + fuzzy queries
-- Falls back to OpenAI GPT (gpt-4o) for on‑the‑fly MT when no TM match >= 50%
+- Falls back to OpenAI GPT model for on‑the‑fly MT when no TM match >= 50%
 - Never stores MT output from /translate (only /add-translation writes)
 
 ## Features
