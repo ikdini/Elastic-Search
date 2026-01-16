@@ -18,23 +18,20 @@
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "googleapis": "^161.0.0",
+    "he": "^1.2.0",
     "openai": "^6.10.0",
     "sbd": "^1.0.19",
-    "string-similarity": "^4.0.4"
+    "string-similarity": "^4.0.4",
+    "zod": "^4.3.5"
   },
   "devDependencies": {
-    "@eslint/js": "^9.37.0",
-    "@eslint/json": "^0.13.2",
     "@types/express": "^5.0.3",
+    "@types/he": "^1.2.3",
     "@types/node": "^24.6.1",
     "@types/sbd": "^1.0.5",
     "@types/string-similarity": "^4.0.2",
-    "eslint": "^9.37.0",
-    "globals": "^16.4.0",
-    "jiti": "^2.6.1",
     "nodemon": "^3.1.10",
     "ts-node": "^10.9.2",
-    "typescript": "^5.8.3",
-    "typescript-eslint": "^8.46.0"
+    "typescript": "^5.8.3"
   }
 }

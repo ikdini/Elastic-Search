@@ -11,7 +11,7 @@ This project is a Node.js + Express.js REST API for translation memory, using El
   - `sourceText`: `text` with a `keyword` subfield
   - `translatedText`: `text`
 - **Endpoints:**
-  - `POST /add-translation`: Add source/target text, split by ".", upsert each segment.
+  - `POST /save-translation`: Add source/target text, split by ".", upsert each segment.
   - `POST /translate`: Split input, look up each segment, return translation if found, else original.
   - `DELETE /delete`: Remove a translation segment by ID.
   - `GET /es-health`: Check Elasticsearch connection.

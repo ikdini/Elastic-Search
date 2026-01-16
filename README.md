@@ -5,7 +5,7 @@ Segment-based translation memory service that:
 - Stores sentence-level bilingual segments in Elasticsearch
 - Performs fuzzy lookups with n‑gram + phrase + fuzzy queries
 - Falls back to OpenAI GPT model for on‑the‑fly MT when no TM match >= 50%
-- Never stores MT output from /translate (only /add-translation writes)
+- Never stores MT output from /translate (only /save-translation writes)
 
 ## Features
 
@@ -86,7 +86,7 @@ Response:
 
 ### 2. Add / Upsert Translation Segments
 
-POST `/add-translation`
+POST `/save-translation`
 Body:
 
 ```json
@@ -189,7 +189,7 @@ Use the HTTP request collections in `requests/` (VS Code REST Client) or curl/Po
 Example curl:
 
 ```bash
-curl -X POST http://localhost:3050/add-translation \
+curl -X POST http://localhost:3050/save-translation \
   -H 'Content-Type: application/json' \
   -d '{"source_lang":"en","target_lang":"fr","source_text":"Hello. How are you?","translated_text":"Bonjour. Comment ça va?"}'
 
@@ -200,7 +200,7 @@ curl -X POST http://localhost:3050/translate \
 
 ## Data Lifecycle Notes
 
-- Only /add-translation writes to Elasticsearch
+- Only /save-translation writes to Elasticsearch
 - /translate never persists OpenAI output (ephemeral usage)
 - Segment granularity ensures maximal TM reuse and minimal duplication
 
