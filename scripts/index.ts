@@ -121,7 +121,7 @@ function split_segments(source_text: string, translated_text?: string) {
 
   const translated_segments = tokenizer.sentences(
     translated_text,
-    tokenizer_options
+    tokenizer_options,
   );
   const mismatch = source_segments.length !== translated_segments.length;
 
@@ -141,7 +141,7 @@ async function find_translation_segment(
   index_name: string,
   source_lang: string,
   target_lang: string,
-  source_text: string
+  source_text: string,
 ): Promise<SearchHit | undefined> {
   const searchResult = await es_client.search<TranslationDocument>({
     index: index_name,
@@ -172,7 +172,7 @@ async function fuzzy_search(
   index_name: string,
   source_lang: string,
   target_lang: string,
-  source_text: string
+  source_text: string,
 ): Promise<(SearchHit & { similarity: number }) | undefined> {
   const search_result = await es_client.search<TranslationDocument>({
     index: index_name,
@@ -221,7 +221,7 @@ async function fuzzy_search(
 
   const best_match_result = stringSimilarity.findBestMatch(
     source_text.toLowerCase(),
-    target_strings
+    target_strings,
   );
 
   const percentage = +(best_match_result.bestMatch.rating * 100).toFixed(2);
@@ -243,14 +243,14 @@ async function fuzzy_search(
  */
 function create_segment_mismatch_report(
   source_segments: string[],
-  translated_segments: string[]
+  translated_segments: string[],
 ): {
   source: string;
   translated: string;
 }[] {
   const max_length = Math.max(
     source_segments.length,
-    translated_segments.length
+    translated_segments.length,
   );
   const segments = Array.from({ length: max_length }, (_, i) => ({
     source: source_segments[i] ?? null,
@@ -258,6 +258,21 @@ function create_segment_mismatch_report(
   }));
 
   return segments;
+}
+
+/**
+ * @function fully_unescape
+ * @param text - Text to fully unescape
+ * @returns Fully unescaped text
+ * Repeatedly unescapes HTML entities until no changes occur.
+ */
+function fully_unescape(text: string): string {
+  let prev: string;
+  do {
+    prev = text;
+    text = unescape(text);
+  } while (text !== prev);
+  return text;
 }
 
 /**
@@ -273,7 +288,7 @@ async function top_search(
   index_name: string,
   source_lang: string,
   target_lang: string,
-  source_text: string
+  source_text: string,
 ): Promise<SearchHit[]> {
   const search_result = await es_client.search<TranslationDocument>({
     index: index_name,
@@ -328,7 +343,7 @@ async function top_search(
 async function chatgpt(
   source_lang: string,
   target_lang: string,
-  segments: string[]
+  segments: string[],
 ): Promise<
   {
     id: number;
@@ -342,7 +357,7 @@ async function chatgpt(
         id: z.number(),
         source: z.string(),
         translation: z.string(),
-      })
+      }),
     ),
   });
 
@@ -410,12 +425,12 @@ app.post(
 
       source_lang = source_lang.toLowerCase().trim().replace(/\s+/g, "-");
       target_lang = target_lang.toLowerCase().trim().replace(/\s+/g, "-");
-      source_text = unescape(source_text);
-      translated_text = unescape(translated_text);
+      source_text = fully_unescape(source_text);
+      translated_text = fully_unescape(translated_text);
 
       const { source_segments, translated_segments, mismatch } = split_segments(
         source_text,
-        translated_text
+        translated_text,
       );
 
       if (mismatch) {
@@ -430,7 +445,7 @@ app.post(
           target_lang,
           segments: create_segment_mismatch_report(
             source_segments,
-            translated_segments!
+            translated_segments!,
           ),
         });
         return;
@@ -445,9 +460,9 @@ app.post(
             index_name,
             source_lang,
             target_lang,
-            segment
-          )
-        )
+            segment,
+          ),
+        ),
       );
 
       const bulkBody: object[] = [];
@@ -472,7 +487,7 @@ app.post(
         } else if (hit) {
           bulkBody.push(
             { update: { _index: index_name, _id: hit._id } },
-            { doc: { translated_text: translated_segments![i] } }
+            { doc: { translated_text: translated_segments![i] } },
           );
           const entry = { id: hit._id ?? null, action: "updated" as const };
           results.push({ segment: seg, ...entry });
@@ -485,7 +500,7 @@ app.post(
               target_lang,
               source_text: seg,
               translated_text: translated_segments![i],
-            }
+            },
           );
           const entry = { id: null, action: "inserted" as const };
           results.push({ segment: seg, ...entry });
@@ -504,7 +519,7 @@ app.post(
             const item = items[i];
             if (item.index?._id) {
               const resultIdx = results.findIndex(
-                (r) => r.action === "inserted" && r.id === null
+                (r) => r.action === "inserted" && r.id === null,
               );
               if (resultIdx !== -1) results[resultIdx].id = item.index._id;
             }
@@ -516,7 +531,7 @@ app.post(
     } catch (err) {
       throw new Error(err instanceof Error ? err.message : "Unknown error");
     }
-  }
+  },
 );
 
 // Fetch translation (segment-based, always fuzzy search, do not store)
@@ -532,7 +547,7 @@ app.post("/translate", async (req: Request, res: Response): Promise<void> => {
 
     source_lang = source_lang.toLowerCase().trim().replace(/\s+/g, "-");
     target_lang = target_lang.toLowerCase().trim().replace(/\s+/g, "-");
-    source_text = unescape(source_text);
+    source_text = fully_unescape(source_text);
 
     const index_name = `${source_lang}-${target_lang}`;
     await ensure_translations_index(index_name);
@@ -558,9 +573,9 @@ app.post("/translate", async (req: Request, res: Response): Promise<void> => {
           index_name,
           source_lang,
           target_lang,
-          uniqueSegmentMap.get(key)!
-        )
-      )
+          uniqueSegmentMap.get(key)!,
+        ),
+      ),
     );
 
     // Build result maps and collect missing segments
@@ -585,7 +600,7 @@ app.post("/translate", async (req: Request, res: Response): Promise<void> => {
       const translations = await chatgpt(
         source_lang,
         target_lang,
-        missingSegments
+        missingSegments,
       );
       for (const t of translations) {
         chatgptResultMap.set(t.source.toLowerCase().trim(), t.translation);
@@ -639,14 +654,14 @@ app.post("/find", async (req: Request, res: Response): Promise<void> => {
 
     source_lang = source_lang?.toLowerCase().trim().replace(/\s+/g, "-");
     target_lang = target_lang?.toLowerCase().trim().replace(/\s+/g, "-");
-    source_text = unescape(source_text);
+    source_text = fully_unescape(source_text);
 
     const index_name = `${source_lang}-${target_lang}`;
     const hits = await top_search(
       index_name,
       source_lang,
       target_lang,
-      source_text
+      source_text,
     );
 
     res.json(hits);
