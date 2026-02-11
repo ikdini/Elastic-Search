@@ -129,6 +129,38 @@ function split_segments(source_text: string, translated_text?: string) {
 }
 
 /**
+ * @function split_segments_by_line
+ * @param source_text - Source text to split by lines and segments
+ * @returns Line-aware segmentation with flat segments for lookup
+ * Preserves original line breaks while enabling segment-based lookup.
+ */
+function split_segments_by_line(source_text: string): {
+  lines: string[];
+  line_segments: string[][];
+  flat_segments: string[];
+} {
+  const tokenizer_options: tokenizer.Options = {
+    newline_boundaries: true,
+    html_boundaries: true,
+  };
+
+  const lines = source_text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const line_segments: string[][] = new Array(lines.length);
+  const flat_segments: string[] = [];
+
+  lines.forEach((line, index) => {
+    const segments = tokenizer.sentences(line, tokenizer_options);
+    line_segments[index] = segments;
+    flat_segments.push(...segments);
+  });
+
+  return { lines, line_segments, flat_segments };
+}
+
+/**
  * @function find_translation_segment
  * @param index_name - Name of the Elasticsearch index
  * @param source_lang - Source language
@@ -551,32 +583,43 @@ app.post("/translate", async (req: Request, res: Response): Promise<void> => {
 
     const index_name = `${source_lang}-${target_lang}`;
     await ensure_translations_index(index_name);
-    const { source_segments } = split_segments(source_text);
+    const { lines, line_segments, flat_segments } =
+      split_segments_by_line(source_text);
 
-    // Build deduplication map with pre-computed keys
-    const uniqueSegmentMap = new Map<string, string>();
-    const segmentKeys = new Array(source_segments.length);
+    // Build deduplication keys and unique segment list
+    const seen_keys = new Set<string>();
+    const unique_keys: string[] = [];
+    const unique_segments: string[] = [];
 
-    for (let i = 0; i < source_segments.length; i++) {
-      const key = source_segments[i].toLowerCase().trim();
-      segmentKeys[i] = key;
-      if (!uniqueSegmentMap.has(key)) {
-        uniqueSegmentMap.set(key, source_segments[i]);
+    for (let i = 0; i < flat_segments.length; i++) {
+      const key = flat_segments[i].toLowerCase();
+      if (!seen_keys.has(key)) {
+        seen_keys.add(key);
+        unique_keys.push(key);
+        unique_segments.push(flat_segments[i]);
       }
     }
 
-    // Parallel fuzzy search for unique segments only
-    const uniqueKeys = Array.from(uniqueSegmentMap.keys());
-    const fuzzyResults = await Promise.all(
-      uniqueKeys.map((key) =>
-        fuzzy_search(
+    // Fuzzy search with a small concurrency limit to reduce ES load spikes
+    const fuzzyResults = new Array<
+      (SearchHit & { similarity: number }) | undefined
+    >(unique_segments.length);
+    const maxConcurrent = 8;
+    let nextIndex = 0;
+    const workerCount = Math.min(maxConcurrent, unique_segments.length);
+    const workers = new Array(workerCount).fill(0).map(async () => {
+      while (nextIndex < unique_segments.length) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        fuzzyResults[currentIndex] = await fuzzy_search(
           index_name,
           source_lang,
           target_lang,
-          uniqueSegmentMap.get(key)!,
-        ),
-      ),
-    );
+          unique_segments[currentIndex],
+        );
+      }
+    });
+    await Promise.all(workers);
 
     // Build result maps and collect missing segments
     const fuzzyResultMap = new Map<
@@ -585,12 +628,12 @@ app.post("/translate", async (req: Request, res: Response): Promise<void> => {
     >();
     const missingSegments: string[] = [];
 
-    for (let i = 0; i < uniqueKeys.length; i++) {
-      const key = uniqueKeys[i];
+    for (let i = 0; i < unique_keys.length; i++) {
+      const key = unique_keys[i];
       if (fuzzyResults[i]) {
         fuzzyResultMap.set(key, fuzzyResults[i]!);
       } else {
-        missingSegments.push(uniqueSegmentMap.get(key)!);
+        missingSegments.push(unique_segments[i]);
       }
     }
 
@@ -603,19 +646,19 @@ app.post("/translate", async (req: Request, res: Response): Promise<void> => {
         missingSegments,
       );
       for (const t of translations) {
-        chatgptResultMap.set(t.source.toLowerCase().trim(), t.translation);
+        chatgptResultMap.set(t.source.toLowerCase(), t.translation);
       }
     }
 
     // Build final results maintaining original order
-    const results = new Array(source_segments.length);
-    for (let i = 0; i < source_segments.length; i++) {
-      const segment_key = segmentKeys[i];
+    const results = new Array(flat_segments.length);
+    for (let i = 0; i < flat_segments.length; i++) {
+      const segment_key = flat_segments[i].toLowerCase();
       const fuzzyHit = fuzzyResultMap.get(segment_key);
 
       results[i] = fuzzyHit?._source?.translated_text
         ? {
-            segment: source_segments[i],
+            line_segment: flat_segments[i],
             translated_text: fuzzyHit._source.translated_text,
             source_text: fuzzyHit._source.source_text,
             similarity: fuzzyHit.similarity,
@@ -623,18 +666,51 @@ app.post("/translate", async (req: Request, res: Response): Promise<void> => {
             id: fuzzyHit._id,
           }
         : {
-            segment: source_segments[i],
+            line_segment: flat_segments[i],
             translated_text:
-              chatgptResultMap.get(segment_key) || source_segments[i],
+              chatgptResultMap.get(segment_key) || flat_segments[i],
             similarity: 0,
             source: "ChatGPT",
             id: null,
           };
     }
 
+    let resultIndex = 0;
+    const segments_by_line: {
+      source_segment: string;
+      translated_text: string;
+      line_segments: (typeof results)[number][];
+    }[] = [];
+    const translated_lines = new Array(line_segments.length);
+
+    for (let i = 0; i < line_segments.length; i++) {
+      const segments = line_segments[i];
+      if (segments.length === 0) {
+        translated_lines[i] = "";
+        continue;
+      }
+
+      const lineResults = new Array(segments.length);
+      for (let j = 0; j < segments.length; j++) {
+        lineResults[j] = results[resultIndex];
+        resultIndex += 1;
+      }
+
+      const translated_text = lineResults
+        .map((result) => result?.translated_text ?? "")
+        .join(" ");
+
+      translated_lines[i] = translated_text;
+      segments_by_line.push({
+        source_segment: lines[i] ?? "",
+        translated_text,
+        line_segments: lineResults,
+      });
+    }
+
     res.json({
-      translated_text: results.map((r) => r.translated_text).join(" "),
-      segments: results,
+      translated_text: translated_lines.join("\n"),
+      segments: segments_by_line,
     });
   } catch (err) {
     throw new Error(err instanceof Error ? err.message : "Unknown error");
