@@ -165,30 +165,57 @@ function split_segments_by_line(source_text: string): {
  * @param index_name - Name of the Elasticsearch index
  * @param source_lang - Source language
  * @param target_lang - Target language
- * @param source_text - Source text segment
- * @returns Search hit or undefined
- * Finds an exact translation segment in the Elasticsearch index.
+ * @param segments - Array of source text segments
+ * @returns Array of search hits or undefined
+ * Finds exact translation segments in the Elasticsearch index using _msearch.
  */
 async function find_translation_segment(
   index_name: string,
   source_lang: string,
   target_lang: string,
-  source_text: string,
-): Promise<SearchHit | undefined> {
-  const searchResult = await es_client.search<TranslationDocument>({
-    index: index_name,
-    size: 1,
-    query: {
-      bool: {
-        must: [
-          { term: { source_lang } },
-          { term: { target_lang } },
-          { term: { "source_text.dedup": source_text.toLowerCase() } },
-        ],
+  segments: string[],
+): Promise<(SearchHit | undefined)[]> {
+  if (segments.length === 0) return [];
+
+  // Build msearch request body
+  const searches = segments.flatMap((segment) => [
+    { index: index_name },
+    {
+      size: 1,
+      query: {
+        bool: {
+          must: [
+            { term: { source_lang } },
+            { term: { target_lang } },
+            { term: { "source_text.dedup": segment.toLowerCase() } },
+          ],
+        },
       },
     },
+  ]);
+
+  const msearch_result = await es_client.msearch<TranslationDocument>({
+    searches,
   });
-  return searchResult.hits.hits[0];
+
+  // Process each response
+  const results: (SearchHit | undefined)[] = [];
+
+  for (let i = 0; i < segments.length; i++) {
+    const response = msearch_result.responses[i];
+
+    if (
+      "error" in response ||
+      !response.hits ||
+      response.hits.hits.length === 0
+    ) {
+      results.push(undefined);
+    } else {
+      results.push(response.hits.hits[0]);
+    }
+  }
+
+  return results;
 }
 
 /**
@@ -196,74 +223,102 @@ async function find_translation_segment(
  * @param index_name - Name of the Elasticsearch index
  * @param source_lang - Source language
  * @param target_lang - Target language
- * @param source_text - Source text segment
- * @returns Search hit with similarity score or undefined
- * Finds the best fuzzy translation segment matching the similarity threshold.
+ * @param segments - Array of source text segments
+ * @returns Array of search hits with similarity scores or undefined
+ * Finds the best fuzzy translation segments matching the similarity threshold using _msearch.
  */
 async function fuzzy_search(
   index_name: string,
   source_lang: string,
   target_lang: string,
-  source_text: string,
-): Promise<(SearchHit & { similarity: number }) | undefined> {
-  const search_result = await es_client.search<TranslationDocument>({
-    index: index_name,
-    size: 10,
-    query: {
-      bool: {
-        must: [{ term: { source_lang } }, { term: { target_lang } }],
-        should: [
-          {
-            match_phrase: {
-              source_text: { query: source_text, boost: 5 },
-            },
-          },
-          {
-            match: {
-              source_text: {
-                query: source_text,
-                operator: "and",
-                boost: 3,
+  segments: string[],
+): Promise<((SearchHit & { similarity: number }) | undefined)[]> {
+  if (segments.length === 0) return [];
+
+  // Build msearch request body
+  const searches = segments.flatMap((segment) => [
+    { index: index_name },
+    {
+      size: 10,
+      query: {
+        bool: {
+          must: [{ term: { source_lang } }, { term: { target_lang } }],
+          should: [
+            {
+              match_phrase: {
+                source_text: { query: segment, boost: 5 },
               },
             },
-          },
-          {
-            match: {
-              source_text: {
-                query: source_text,
-                fuzziness: "AUTO",
-                boost: 1,
+            {
+              match: {
+                source_text: {
+                  query: segment,
+                  operator: "and",
+                  boost: 3,
+                },
               },
             },
-          },
-        ],
-        minimum_should_match: 1,
+            {
+              match: {
+                source_text: {
+                  query: segment,
+                  fuzziness: "AUTO",
+                  boost: 1,
+                },
+              },
+            },
+          ],
+          minimum_should_match: 1,
+        },
       },
     },
+  ]);
+
+  const msearch_result = await es_client.msearch<TranslationDocument>({
+    searches,
   });
 
-  const hits = search_result.hits.hits;
-  if (hits.length === 0) return undefined;
+  // Process each response
+  const results: ((SearchHit & { similarity: number }) | undefined)[] = [];
 
-  const target_strings = hits
-    .map((hit) => hit._source?.source_text?.toLowerCase())
-    .filter((text): text is string => text !== undefined);
+  for (let i = 0; i < segments.length; i++) {
+    const response = msearch_result.responses[i];
 
-  if (target_strings.length === 0) return undefined;
+    if (
+      "error" in response ||
+      !response.hits ||
+      response.hits.hits.length === 0
+    ) {
+      results.push(undefined);
+      continue;
+    }
 
-  const best_match_result = stringSimilarity.findBestMatch(
-    source_text.toLowerCase(),
-    target_strings,
-  );
+    const hits = response.hits.hits;
+    const target_strings = hits
+      .map((hit) => hit._source?.source_text?.toLowerCase())
+      .filter((text): text is string => text !== undefined);
 
-  const percentage = +(best_match_result.bestMatch.rating * 100).toFixed(2);
+    if (target_strings.length === 0) {
+      results.push(undefined);
+      continue;
+    }
 
-  if (percentage >= SIMILARITY_THRESHOLD) {
-    const best_hit = hits[best_match_result.bestMatchIndex];
-    return { ...best_hit, similarity: percentage };
+    const best_match_result = stringSimilarity.findBestMatch(
+      segments[i].toLowerCase(),
+      target_strings,
+    );
+
+    const percentage = +(best_match_result.bestMatch.rating * 100).toFixed(2);
+
+    if (percentage >= SIMILARITY_THRESHOLD) {
+      const best_hit = hits[best_match_result.bestMatchIndex];
+      results.push({ ...best_hit, similarity: percentage });
+    } else {
+      results.push(undefined);
+    }
   }
 
-  return undefined;
+  return results;
 }
 
 /**
@@ -370,7 +425,7 @@ async function top_search(
  * @param target_lang - Target language
  * @param segments - Array of source text segments
  * @returns Array of translation objects
- * Uses OpenAI's model to translate text segments.
+ * Uses OpenAI's model to translate text segments in batches.
  */
 async function chatgpt(
   source_lang: string,
@@ -383,6 +438,13 @@ async function chatgpt(
     translation: string;
   }[]
 > {
+  const BATCH_SIZE = 100; // Limit batch size to prevent token overflow
+  const allTranslations: {
+    id: number;
+    source: string;
+    translation: string;
+  }[] = [];
+
   const TranslationsList = z.object({
     translations: z.array(
       z.object({
@@ -393,43 +455,50 @@ async function chatgpt(
     ),
   });
 
-  // Format segments with indices for better tracking
-  const segmentsWithIds = segments.map((seg, idx) => ({
-    id: idx,
-    source: seg,
-  }));
+  // Process in batches
+  for (let i = 0; i < segments.length; i += BATCH_SIZE) {
+    const batch = segments.slice(i, i + BATCH_SIZE);
 
-  const response = await openai.responses.parse({
-    model: "gpt-5.2",
-    input: [
-      {
-        role: "developer",
-        content: [
-          {
-            type: "input_text",
-            text: `You are a professional native ${target_lang} translator.\n\nYour task is to translate MULTIPLE text segments from ${source_lang} to ${target_lang}.\n\nYou must follow ALL rules below EXACTLY.\n\nTRANSLATION RULES (apply to every segment individually):\n\n1. Meaning Preservation\n   - Preserve every meaning with full precision.\n   - Do NOT add, omit, generalize, infer, clarify, emphasize, or invent anything.\n\n2. Punctuation & Symbols Fidelity\n   - Do NOT introduce punctuation, quotation marks, symbols, or formatting that do not exist in the ${source_lang} text.\n   - If the ${source_lang} text uses "double quotes", the ${target_lang} translation MUST also use "double quotes".\n   - Do NOT replace quotes with language-specific variants.\n   - Do NOT add emphasis marks, dashes, colons, or parentheses unless they exist in the ${source_lang} text.\n\n3. Code & Markup Preservation (VERBATIM)\n   - ALL code elements MUST be preserved character-for-character.\n   - NEVER translate, reformat, explain, or normalize code.\n   - If a segment contains only code or markup, return it EXACTLY as-is.\n   - If a segment contains both code and natural language, translate ONLY the natural language.\n\n4. Output Discipline\n   - NEVER explain anything.\n   - NEVER add comments.\n   - NEVER add meta-text.\n   - Output ONLY valid JSON.\n\nOUTPUT FORMAT REQUIREMENT:\n\nYou MUST return a JSON object with this exact structure:\n\n{\n  "translations": [\n    {\n      "id": number,\n      "source": string,\n      "translation": string\n    }\n  ]\n}\n\n- The order of items must match the input order exactly.\n- Each id must be copied exactly from input.\n- Each source must be copied exactly from input.\n- Each translation must obey all rules above\n`,
-          },
-        ],
-      },
-      {
-        role: "user",
-        content: [
-          {
-            type: "input_text",
-            text: JSON.stringify(segmentsWithIds),
-          },
-        ],
-      },
-    ],
-    text: {
-      format: zodTextFormat(TranslationsList, "translations_list"),
-    },
-    store: false,
-    max_output_tokens: 25000,
-  });
+    // Format segments with indices for better tracking
+    const segmentsWithIds = batch.map((seg, idx) => ({
+      id: i + idx,
+      source: seg,
+    }));
 
-  const output = response.output_parsed!.translations;
-  return output;
+    const response = await openai.responses.parse({
+      model: "gpt-5.2",
+      input: [
+        {
+          role: "developer",
+          content: [
+            {
+              type: "input_text",
+              text: `You are a professional native ${target_lang} translator.\n\nYour task is to translate MULTIPLE text segments from ${source_lang} to ${target_lang}.\n\nYou must follow ALL rules below EXACTLY.\n\nTRANSLATION RULES (apply to every segment individually):\n\n1. Meaning Preservation\n   - Preserve every meaning with full precision.\n   - Do NOT add, omit, generalize, infer, clarify, emphasize, or invent anything.\n\n2. Punctuation & Symbols Fidelity\n   - Do NOT introduce punctuation, quotation marks, symbols, or formatting that do not exist in the ${source_lang} text.\n   - If the ${source_lang} text uses "double quotes", the ${target_lang} translation MUST also use "double quotes".\n   - Do NOT replace quotes with language-specific variants.\n   - Do NOT add emphasis marks, dashes, colons, or parentheses unless they exist in the ${source_lang} text.\n\n3. Code & Markup Preservation (VERBATIM)\n   - ALL code elements MUST be preserved character-for-character.\n   - NEVER translate, reformat, explain, or normalize code.\n   - If a segment contains only code or markup, return it EXACTLY as-is.\n   - If a segment contains both code and natural language, translate ONLY the natural language.\n\n4. Output Discipline\n   - NEVER explain anything.\n   - NEVER add comments.\n   - NEVER add meta-text.\n   - Output ONLY valid JSON.\n\nOUTPUT FORMAT REQUIREMENT:\n\nYou MUST return a JSON object with this exact structure:\n\n{\n  "translations": [\n    {\n      "id": number,\n      "source": string,\n      "translation": string\n    }\n  ]\n}\n\n- The order of items must match the input order exactly.\n- Each id must be copied exactly from input.\n- Each source must be copied exactly from input.\n- Each translation must obey all rules above\n`,
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: JSON.stringify(segmentsWithIds),
+            },
+          ],
+        },
+      ],
+      text: {
+        format: zodTextFormat(TranslationsList, "translations_list"),
+      },
+      store: false,
+      max_output_tokens: 25000,
+    });
+
+    const batchTranslations = response.output_parsed!.translations;
+    allTranslations.push(...batchTranslations);
+  }
+
+  return allTranslations;
 }
 
 // Health check for Elasticsearch connection
@@ -486,15 +555,12 @@ app.post(
       const index_name = `${source_lang}-${target_lang}`;
       await ensure_translations_index(index_name);
 
-      const hits = await Promise.all(
-        source_segments.map((segment) =>
-          find_translation_segment(
-            index_name,
-            source_lang,
-            target_lang,
-            segment,
-          ),
-        ),
+      // Use batch search for better performance
+      const hits = await find_translation_segment(
+        index_name,
+        source_lang,
+        target_lang,
+        source_segments,
       );
 
       const bulkBody: object[] = [];
@@ -561,7 +627,16 @@ app.post(
 
       res.json({ segments: results });
     } catch (err) {
-      throw new Error(err instanceof Error ? err.message : "Unknown error");
+      console.error("[/save-translation] Error:", {
+        error: err instanceof Error ? err.message : "Unknown error",
+        source_lang: req.body.source_lang,
+        target_lang: req.body.target_lang,
+      });
+      res.status(500).json({
+        error: "Failed to save translation",
+        details: err instanceof Error ? err.message : "Unknown error",
+      });
+      return;
     }
   },
 );
@@ -600,26 +675,13 @@ app.post("/translate", async (req: Request, res: Response): Promise<void> => {
       }
     }
 
-    // Fuzzy search with a small concurrency limit to reduce ES load spikes
-    const fuzzyResults = new Array<
-      (SearchHit & { similarity: number }) | undefined
-    >(unique_segments.length);
-    const maxConcurrent = 8;
-    let nextIndex = 0;
-    const workerCount = Math.min(maxConcurrent, unique_segments.length);
-    const workers = new Array(workerCount).fill(0).map(async () => {
-      while (nextIndex < unique_segments.length) {
-        const currentIndex = nextIndex;
-        nextIndex += 1;
-        fuzzyResults[currentIndex] = await fuzzy_search(
-          index_name,
-          source_lang,
-          target_lang,
-          unique_segments[currentIndex],
-        );
-      }
-    });
-    await Promise.all(workers);
+    // Batch fuzzy search using _msearch API
+    const fuzzyResults = await fuzzy_search(
+      index_name,
+      source_lang,
+      target_lang,
+      unique_segments,
+    );
 
     // Build result maps and collect missing segments
     const fuzzyResultMap = new Map<
@@ -713,7 +775,15 @@ app.post("/translate", async (req: Request, res: Response): Promise<void> => {
       segments: segments_by_line,
     });
   } catch (err) {
-    throw new Error(err instanceof Error ? err.message : "Unknown error");
+    console.error("[/translate] Error:", {
+      error: err instanceof Error ? err.message : "Unknown error",
+      request: req.body,
+    });
+    res.status(500).json({
+      error: "Translation failed",
+      details: err instanceof Error ? err.message : "Unknown error",
+    });
+    return;
   }
 });
 
@@ -742,7 +812,15 @@ app.post("/find", async (req: Request, res: Response): Promise<void> => {
 
     res.json(hits);
   } catch (err) {
-    throw new Error(err instanceof Error ? err.message : "Unknown error");
+    console.error("[/find] Error:", {
+      error: err instanceof Error ? err.message : "Unknown error",
+      request: req.body,
+    });
+    res.status(500).json({
+      error: "Search failed",
+      details: err instanceof Error ? err.message : "Unknown error",
+    });
+    return;
   }
 });
 
@@ -770,7 +848,15 @@ app.delete("/delete", async (req: Request, res: Response): Promise<void> => {
     const result = await es_client.delete({ index: index_name, id });
     res.json({ success: true, result });
   } catch (err) {
-    throw new Error(err instanceof Error ? err.message : "Unknown error");
+    console.error("[/delete] Error:", {
+      error: err instanceof Error ? err.message : "Unknown error",
+      request: req.body,
+    });
+    res.status(500).json({
+      error: "Delete failed",
+      details: err instanceof Error ? err.message : "Unknown error",
+    });
+    return;
   }
 });
 
